@@ -37,6 +37,7 @@ import android.os.AsyncTask;
 import android.os.Build.VERSION;
 import android.os.Handler;
 import android.os.Message;
+import android.os.SystemClock;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 import android.util.AttributeSet;
@@ -71,8 +72,10 @@ import com.facebook.imagepipeline.memory.PooledByteBuffer;
 import com.facebook.imagepipeline.memory.PooledByteBufferInputStream;
 import com.facebook.imagepipeline.request.ImageRequest;
 import com.facebook.imagepipeline.request.ImageRequestBuilder;
-import com.mzba.fresco.R.styleable;
+import com.greenstone.common.utils.LogUtil;
+import com.greenstone.gstonechat.R.styleable;
 import com.mzba.fresco.ui.widget.CustomProgressbarDrawable;
+import com.mzba.fresco.ui.widget.ImageDownloadListener;
 import com.mzba.fresco.utils.AndroidUtils;
 import com.mzba.fresco.utils.cache.FileCache;
 import com.mzba.fresco.utils.cache.FileUtils;
@@ -104,9 +107,10 @@ public class SubsamplingScaleImageView extends View {
 
     private static final String TAG = SubsamplingScaleImageView.class.getSimpleName();
 
-    DraweeHolder<GenericDraweeHierarchy> mDraweeHolder;
+    private DraweeHolder<GenericDraweeHierarchy> mDraweeHolder;
     private CloseableReference<CloseableImage> imageReference = null;
     private CloseableReference<PooledByteBuffer> bytes;
+    private ImageDownloadListener mDownloadListener = null;
 
     /** Attempt to use EXIF information on the image to rotate it. Works for external files only. */
     public static final int ORIENTATION_USE_EXIF = -1;
@@ -344,6 +348,10 @@ public class SubsamplingScaleImageView extends View {
         }
         quickScaleThreshold = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 20, context.getResources().getDisplayMetrics());
     }
+    
+    public void setImageDownloadListener(ImageDownloadListener mDownloadListener) {
+        this.mDownloadListener = mDownloadListener;
+    }
 
     /**
      * Sets the image orientation. It's best to call this before setting the image file or asset, because it may waste
@@ -358,6 +366,7 @@ public class SubsamplingScaleImageView extends View {
         invalidate();
         requestLayout();
     }
+    
 
     /**
      * Set the image source from a bitmap, resource, asset, file or other URI.
@@ -1388,11 +1397,16 @@ public class SubsamplingScaleImageView extends View {
             }
         }
     }
-
+    
+    private void resetImage(){
+    	setImageUri(url);
+    }
+    
+    private int j = 0;
     /**
      * Async task used to get image details without blocking the UI thread.
      */
-    private static class TilesInitTask extends AsyncTask<Void, Void, int[]> {
+    private class TilesInitTask extends AsyncTask<Void, Void, int[]> {
         private final WeakReference<SubsamplingScaleImageView> viewRef;
         private final WeakReference<Context> contextRef;
         private final WeakReference<DecoderFactory<? extends ImageRegionDecoder>> decoderFactoryRef;
@@ -1409,6 +1423,7 @@ public class SubsamplingScaleImageView extends View {
 
         @Override
         protected int[] doInBackground(Void... params) {
+        	j++;
             try {
                 String sourceUri = source.toString();
                 Context context = contextRef.get();
@@ -1429,6 +1444,9 @@ public class SubsamplingScaleImageView extends View {
             } catch (Exception e) {
                 Log.e(TAG, "Failed to initialise bitmap decoder", e);
                 this.exception = e;
+                if(j<5){
+                	resetImage();
+                }
             }
             return null;
         }
@@ -2681,19 +2699,36 @@ public class SubsamplingScaleImageView extends View {
         super.onFinishTemporaryDetach();
         mDraweeHolder.onAttach();
     }
-
+    
+    private int i = 0;
+    private String url;
     public void setImageUri(final String url) {
+    	this.url = url;
         ImageRequest imageRequest = ImageRequestBuilder.newBuilderWithSource(Uri.parse(url)).build();
-        ImagePipeline imagePipeline = Fresco.getImagePipeline();
+        final ImagePipeline imagePipeline = Fresco.getImagePipeline();
         final DataSource<CloseableReference<PooledByteBuffer>> dataSource = imagePipeline.fetchEncodedImage(imageRequest, this);
+        SystemClock.sleep(10);
         DraweeController controller = Fresco.newDraweeControllerBuilder()
                 .setOldController(mDraweeHolder.getController())
                 .setImageRequest(imageRequest)
                 .setControllerListener(new BaseControllerListener<ImageInfo>() {
                     @Override
                     public void onFinalImageSet(String s, @Nullable ImageInfo imageInfo, @Nullable Animatable animatable) {
+                    	SystemClock.sleep(10);
+                    	LogUtil.i("setImageUri*********", "onFinalImageSet");
                         try {
                             bytes = dataSource.getResult();
+                            if(bytes == null){
+                            	LogUtil.i("setImageUri*********", "setImageUri****null*****");
+                            	i++;
+                            	if(i == 20){
+                            		return;
+                            	}
+//                            	imagePipeline.evictFromMemoryCache(Uri.parse(url));
+//                            	dataSource.close();
+                            	setImageUri(url);
+                            	return;
+                            }
                             if (bytes != null) {
                                 PooledByteBuffer pooledByteBuffer = bytes.get();
                                 PooledByteBufferInputStream sourceIs = new PooledByteBufferInputStream(pooledByteBuffer);
@@ -2702,13 +2737,17 @@ public class SubsamplingScaleImageView extends View {
                                 FileCache fileCache = new FileCache(getContext());
                                 File f = new File(fileCache.getCacheDir(), filename);
                                 try {
-                                    f.createNewFile();
+                                	if(!f.exists()){
+                                		LogUtil.i("setImageUri********path*", "!f.exists()" + fileCache.getCacheDir());
+                                		f.createNewFile();
+                                	}
                                     OutputStream os = new FileOutputStream(f);
                                     FileUtils.CopyStream(bis, os);
                                 } catch (IOException e) {
                                     e.printStackTrace();
                                 }
                                 setImage(ImageSource.uri(f.getAbsolutePath()));
+                                LogUtil.i("setImageUri********path*", "setImageUri*********" + f.getAbsolutePath());
                                 setMaxScale(SubsamplingScaleImageView.SCALE_TYPE_CUSTOM);
                                 int width = getWidth();
                                 int height = getHeight();
@@ -2720,6 +2759,9 @@ public class SubsamplingScaleImageView extends View {
                                     PointF center = new PointF(getSWidth() / 2, 0);
                                     float targetScale = Math.max(width / (float) getSWidth(), height / (float) getSHeight());
                                     setScaleAndCenter(targetScale, center);
+                                }
+                                if (mDownloadListener != null) {
+                                	mDownloadListener.onFinish();
                                 }
                             }
                         } finally {
@@ -2768,6 +2810,9 @@ public class SubsamplingScaleImageView extends View {
                                             setScaleAndCenter(targetScale, center);
                                         }
                                     }
+                                }
+                                if (mDownloadListener != null) {
+                                	mDownloadListener.onFinish();
                                 }
                             }
                         } finally {
